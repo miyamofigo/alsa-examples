@@ -5,4 +5,5 @@ authors = ["Takeo Miyamoto <miyamofigo@gmail.com>"]
 
 [dependencies]
 alsa = "*"
+byteorder = "*"
 rayon = "*"
