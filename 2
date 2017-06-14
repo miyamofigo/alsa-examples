@@ -1,6 +1,7 @@
 extern crate byteorder;
 extern crate rayon;
-use std::fs::File; use std::f32::consts::PI;
+use std::fs::File;
+use std::f32::consts::PI;
 use std::io::prelude::*;
 use std::io::Cursor;
 
@@ -9,8 +10,12 @@ use rayon::prelude::*;
 
 #[macro_export]
 macro_rules! prepare_default_pcm {
-    ($pcm:ident) => {{ let hw_params = HwParams::any(&$pcm).unwrap(); hw_params.set_channels(1).unwrap();     hw_params.set_rate(SAMPLING_FREQUENCY, ValueOr::Nearest).unwrap();
-        hw_params.set_format(Format::float()).unwrap(); hw_params.set_access(Access::RWInterleaved).unwrap();
+    ($pcm:ident) => {{
+        let hw_params = HwParams::any(&$pcm).unwrap();
+        hw_params.set_channels(1).unwrap();     
+        hw_params.set_rate(SAMPLING_FREQUENCY, ValueOr::Nearest).unwrap();
+        hw_params.set_format(Format::float()).unwrap();
+        hw_params.set_access(Access::RWInterleaved).unwrap();
         $pcm.hw_params(&hw_params).unwrap(); 
     }}
 } 
@@ -215,15 +220,16 @@ fn count_stage(n: usize) -> usize { (n as f32).log(2.0) as usize }
 
 fn compute_stage(src: Vec<(f32, f32)>, curr: usize, limit: usize) -> Vec<(f32, f32)> {
     match curr {
-        curr if curr >= limit => src,
+        curr if curr > limit => src,
         _ => compute_stage(match curr - 1 {
             0 => src,
             num => (0..(2usize.pow(num as u32))).into_iter().fold(Vec::new(), |mut acc, i| {
-                let res: Vec<_> = (0..(2usize.pow((limit - curr) as u32))).into_iter().map(|j| {
-                    let m = 2usize.pow((limit - curr + 1) as u32) * i + j;
-                    let (n, r) = (2usize.pow((limit - curr) as u32) + m, 2usize.pow((curr - 1) as u32) * j);
+                let res: Vec<_> = (0..(2usize.pow(limit - curr))).into_iter().map(|j| {
+                    let m = 2usize.pow(limit - curr + 1) * i + j;
+                    let (n, r) = (2usize.pow(limit + curr) + m, 2usize.pow(curr - 1) * j);
 
-                    let w = 2.0 * PI * r as f32 / n as f32; let ((a_real, a_img), (b_real, b_img), (c_real, c_img)) = (src[m], src[n], (w.cos(), -w.sin()));
+                    let w = 2.0 * PI * r as f32 / n as f32;
+                    let ((a_real, a_img), (b_real, b_img), (c_real, c_img)) = (src[m], src[n], (w.cos(), -w.sin()));
 
                     if curr == limit {
                         (
@@ -253,30 +259,12 @@ fn compute_stage(src: Vec<(f32, f32)>, curr: usize, limit: usize) -> Vec<(f32, f
     }
 }
 
-fn indices(len: usize) -> Vec<usize> {
-    (0..len).into_iter().map(compute_index_weight).collect()
-}
-
-fn compute_index_weight(idx: usize) -> usize {
-    let num = match idx {
-        0 => 0,
-        _ => (idx as f32).log(2.0) as usize
-    };
-    (0..num).into_iter().fold(0, |acc, i| acc + 2usize.pow(i as u32))
-}
-
-fn sort_fft_vec<'a>(v: &'a mut Vec<(f32, f32)>) {
-    for (i, j) in indices(v.len()).iter().enumerate().filter(|&(i, j)| i < *j) { 
-        v.swap(i, *j); 
-    }
-}
+//fn indices(lim: usize) -> Vec[usize] {
+//    (0..lim).into_iter().map(|i| i + 1).fold(Vec::new(), |mut acc, i| {
+//    })
+//}
  
-pub fn fft(src: Vec<f32>) -> Vec<(f32, f32)> {  
-    let (stage_num, pair_v) = (
-        count_stage(src.len()),
-        src.into_iter().map(|i| (i, 0.0)).collect()
-    );
-
-    let mut res = compute_stage(pair_v, 1, stage_num);
-    sort_fft_vec(&mut res); res
+pub fn fft(src: Vec<f32>, n: usize) -> Vec<(f32, f32)> {  
+    let (pair_v, stage_num) = (src.into_iter().map(|i| (i, 0.0)).collect(), count_stage(n));
+    compute_stage(pair_v, 1, stage_num)
 }
