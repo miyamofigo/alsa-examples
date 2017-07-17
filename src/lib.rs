@@ -4,15 +4,20 @@ use std::fs::File; use std::f32::consts::PI;
 use std::io::prelude::*;
 use std::io::Cursor;
 
-use byteorder::{ LittleEndian, ReadBytesExt };
-use rayon::prelude::*;
+use byteorder::{ LittleEndian, ReadBytesExt }; use rayon::prelude::*;
 
 #[macro_export]
 macro_rules! prepare_default_pcm {
-    ($pcm:ident) => {{ let hw_params = HwParams::any(&$pcm).unwrap(); hw_params.set_channels(1).unwrap();     hw_params.set_rate(SAMPLING_FREQUENCY, ValueOr::Nearest).unwrap();
-        hw_params.set_format(Format::float()).unwrap(); hw_params.set_access(Access::RWInterleaved).unwrap();
-        $pcm.hw_params(&hw_params).unwrap(); 
-    }}
+    ($pcm:ident) => {
+        { 
+            let hw_params = HwParams::any(&$pcm).unwrap(); 
+            hw_params.set_channels(1).unwrap();     
+            hw_params.set_rate(SAMPLING_FREQUENCY, ValueOr::Nearest).unwrap(); 
+            hw_params.set_format(Format::float()).unwrap(); 
+            hw_params.set_access(Access::RWInterleaved).unwrap();
+            $pcm.hw_params(&hw_params).unwrap(); 
+        }
+    }
 } 
 
 macro_rules! genbufs {
@@ -27,8 +32,7 @@ macro_rules! __item {
 
 macro_rules! s {
     ( $( $( #[$attr:meta] )* pub struct $i:ident { $( $f:ident : $t:ty ),+ } )+ ) =>  {$(
-        __item! {
-            $( #[$attr] )*
+        __item! { $( #[$attr] )*
             pub struct $i { $(pub $f : $t),+ }
         }
         impl $i {
@@ -163,7 +167,8 @@ type FormatHeader = SubcHeader;
 type DataHeader = SubcHeader;
 
 pub struct Wave {
-    pub riff: Riff, format_header: FormatHeader,
+    pub riff: Riff, 
+    pub format_header: FormatHeader,
     pub format: Format,
     pub data_header: DataHeader,
     pub data: Vec<f32>
@@ -281,3 +286,14 @@ pub fn fft(src: Vec<f32>) -> Vec<(f32, f32)> {
     sort_fft_vec(&mut res); res
 }
 
+fn sinc(x: f32) -> f32 {
+    match x {
+        0.0 => 1.0,
+        _ => x.sin() / x
+    }
+}
+
+pub fn fir_lpf(freq: f32, num: isize, src: Vec<f32>) -> Vec<f32> {
+    (0..(num + 1)).into_iter().map(|i| 2.0 * freq * sinc(2.0 * PI * freq * (i - num / 2) as f32))
+        .zip(src.iter()).map(|(b, w)| b * w).collect()
+}
