@@ -1,31 +1,18 @@
 extern crate byteorder;
 extern crate rayon;
+use std::fmt;
 use std::fs::File; use std::f32::consts::PI;
 use std::io::prelude::*;
-use std::io::Cursor;
-
-use byteorder::{ LittleEndian, ReadBytesExt }; use rayon::prelude::*;
-
-#[macro_export]
-macro_rules! prepare_default_pcm {
-    ($pcm:ident) => {
-        { 
-            let hw_params = HwParams::any(&$pcm).unwrap(); 
-            hw_params.set_channels(1).unwrap();     
-            hw_params.set_rate(SAMPLING_FREQUENCY, ValueOr::Nearest).unwrap(); 
-            hw_params.set_format(Format::float()).unwrap(); 
-            hw_params.set_access(Access::RWInterleaved).unwrap();
-            $pcm.hw_params(&hw_params).unwrap(); 
-        }
-    }
+use std::io::Cursor; use byteorder::{ LittleEndian, ReadBytesExt }; use rayon::prelude::*;
+#[macro_export] macro_rules! prepare_default_pcm { ($pcm:ident) => { { let hw_params = HwParams::any(&$pcm).unwrap(); hw_params.set_channels(1).unwrap();     
+            hw_params.set_rate(SAMPLING_FREQUENCY, ValueOr::Nearest).unwrap(); hw_params.set_format(Format::float()).unwrap(); 
+            hw_params.set_access(Access::RWInterleaved).unwrap(); $pcm.hw_params(&hw_params).unwrap(); } }
 } 
-
 macro_rules! genbufs {
     ( $t:ty, $($size:expr),+ ) => { ( $(vec![0 as $t; $size],)+ ) } } const VALIDATION_ERR: &'static str = "an invalid sized vector exists.";
 
 trait Validator {
-    fn validate(&self) -> Result<(), &str>;
-}
+    fn validate(&self) -> Result<(), &str>; }
 
 macro_rules! __item {
     ( $i:item ) => ($i) }
@@ -288,7 +275,7 @@ pub fn fft(src: Vec<f32>) -> Vec<(f32, f32)> {
 
 fn sinc(x: f32) -> f32 {
     match x {
-        0.0 => 1.0,
+        x if x == 0.0 => 1.0,
         _ => x.sin() / x
     }
 }
@@ -296,4 +283,108 @@ fn sinc(x: f32) -> f32 {
 pub fn fir_lpf(freq: f32, num: isize, src: Vec<f32>) -> Vec<f32> {
     (0..(num + 1)).into_iter().map(|i| 2.0 * freq * sinc(2.0 * PI * freq * (i - num / 2) as f32))
         .zip(src.iter()).map(|(b, w)| b * w).collect()
+}
+
+fn bilinear_transform(anal_freq: f32) -> f32 {
+    (PI * anal_freq).tan() / (2.0 * PI) 
+}
+
+type IIRDenominatorParams = (f32, f32, f32);
+type IIRNumeratorParams = (f32, f32, f32);
+
+pub fn iir_lpf(anal_freq: f32, qf: f32) -> (IIRDenominatorParams, IIRNumeratorParams) {
+    let digit_freq = bilinear_transform(anal_freq);
+    let temp = 4.0 * PI.powi(2) * digit_freq.powi(2);
+    let denom = 1.0 + 2.0 * PI * digit_freq / qf + temp;
+    ((1.0,
+      (2.0 * temp - 2.0) / denom,
+      (1.0 - 2.0 * PI * digit_freq / qf + temp / denom)),
+     (temp / denom,
+      2.0 * temp / denom, temp / denom)) 
+} 
+
+pub trait Trigram<'a, T: 'a + fmt::Debug + Clone>: Iterator<Item=T> where Self: Sized {
+    fn trigrams(self, pad: T) -> Trigrams<'a, T>;
+}
+
+impl<'a, T: 'a + fmt::Debug + Clone, U: 'a + Iterator<Item=T> + Clone> Trigram<'a, T> for U {
+    fn trigrams(self, pad: T) -> Trigrams<'a, T> {
+        Trigrams::new(self, pad)
+    }
+}
+
+pub struct Trigrams<'a, T: 'a + fmt::Debug + Clone> {
+    first: Box<Iterator<Item = T> + 'a>,
+    second: Box<Iterator<Item = T> + 'a>,
+    third: Box<Iterator<Item = T> + 'a>,
+    remaining: usize,
+    pad: T
+}
+
+impl<'a, T: 'a + fmt::Debug + Clone> fmt::Debug for Trigrams<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Trigrams(tokens)")
+    }
+}
+
+impl<'a, T: 'a + fmt::Debug + Clone + Sized> Trigrams<'a, T> {
+    fn new<V: 'a + Iterator<Item = T> + Clone>(source: V, pad: T) -> Trigrams<'a, T> {
+        let (first, second, third) = (
+            Box::new(source.clone()),
+            Box::new(source.clone()),
+            Box::new(source.clone())
+        );
+
+        Trigrams { 
+            first, second, third, pad,
+            remaining: 2
+        }
+    }
+
+    fn pad(&self) -> T {
+        self.pad.clone()
+    }
+}
+
+impl <'a, T: 'a + fmt::Debug + Clone> Iterator for Trigrams<'a, T> {
+    type Item = (T, T, T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.remaining {
+            2 => {
+                self.remaining -= 1;
+                Some((self.pad(), self.pad(), self.first.next().unwrap()))
+            },
+            1 => {
+                self.remaining -= 1;
+                Some((self.pad(), self.second.next().unwrap(), self.first.next().unwrap()))
+            },
+            _ => match (
+                self.third.next(), 
+                self.second.next(), 
+                self.first.next()
+            ) {
+                (Some(t), Some(s), Some(f)) => Some((t, s, f)),
+                _ => None
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Trigram;
+
+    #[test]
+    fn test_trigram() {
+        let (source, pad) = (vec![1, 2, 3, 4, 5], &0); 
+        let res: Vec<_> = source.iter().trigrams(pad).collect();
+
+        assert_eq!(res, vec![(&0, &0, &1),
+            (&0, &1, &2),
+            (&1, &2, &3), 
+            (&2, &3, &4), 
+            (&3, &4, &5)]
+        );
+    }
 }
