@@ -3,19 +3,37 @@ extern crate rayon;
 use std::fmt;
 use std::fs::File; use std::f32::consts::PI;
 use std::io::prelude::*;
-use std::io::Cursor; use byteorder::{ LittleEndian, ReadBytesExt }; use rayon::prelude::*;
-#[macro_export] macro_rules! prepare_default_pcm { ($pcm:ident) => { { let hw_params = HwParams::any(&$pcm).unwrap(); hw_params.set_channels(1).unwrap();     
-            hw_params.set_rate(SAMPLING_FREQUENCY, ValueOr::Nearest).unwrap(); hw_params.set_format(Format::float()).unwrap(); 
-            hw_params.set_access(Access::RWInterleaved).unwrap(); $pcm.hw_params(&hw_params).unwrap(); } }
+use std::io::Cursor; 
+use byteorder::{ LittleEndian, ReadBytesExt }; 
+use rayon::prelude::*;
+
+#[macro_export] 
+macro_rules! prepare_default_pcm { 
+    ($pcm:ident) => { 
+        { 
+            let hw_params = HwParams::any(&$pcm).unwrap(); 
+            hw_params.set_channels(1).unwrap();     
+            hw_params.set_rate(SAMPLING_FREQUENCY, ValueOr::Nearest).unwrap(); 
+            hw_params.set_format(Format::float()).unwrap(); 
+            hw_params.set_access(Access::RWInterleaved).unwrap(); 
+            $pcm.hw_params(&hw_params).unwrap(); 
+        } 
+    }
 } 
+
 macro_rules! genbufs {
-    ( $t:ty, $($size:expr),+ ) => { ( $(vec![0 as $t; $size],)+ ) } } const VALIDATION_ERR: &'static str = "an invalid sized vector exists.";
+    ( $t:ty, $($size:expr),+ ) => { ( $(vec![0 as $t; $size],)+ ) } 
+} 
+
+const VALIDATION_ERR: &'static str = "an invalid sized vector exists.";
 
 trait Validator {
-    fn validate(&self) -> Result<(), &str>; }
+    fn validate(&self) -> Result<(), &str>; 
+}
 
 macro_rules! __item {
-    ( $i:item ) => ($i) }
+    ( $i:item ) => ($i) 
+}
 
 macro_rules! s {
     ( $( $( #[$attr:meta] )* pub struct $i:ident { $( $f:ident : $t:ty ),+ } )+ ) =>  {$(
@@ -205,7 +223,30 @@ pub fn hann(n: usize) -> Vec<f32> {
 
 fn count_stage(n: usize) -> usize { (n as f32).log(2.0) as usize }
 
-fn compute_stage(src: Vec<(f32, f32)>, curr: usize, limit: usize) -> Vec<(f32, f32)> {
+fn butterfly_params_helper(curr: usize, limit: usize, j: usize, m: usize) -> f32 {
+   let (n, r) = (
+       2usize.pow((limit - curr) as u32) + m,
+       2usize.pow((curr - 1) as u32) * j
+   );
+   2.0 * PI * r as f32 / n as f32
+}
+
+fn fft_butterfly_params(curr: usize, limit: usize, j: usize, m: usize) -> (f32, f32) {
+    let w = butterfly_params_helper(curr, limit, j, m);
+    (w.cos(), -w.sin())
+}
+
+fn ifft_butterfly_params(curr: usize, limit: usize, j: usize, m: usize) -> (f32, f32) {
+    let w = butterfly_params_helper(curr, limit, j, m);
+    (w.cos(), w.sin())
+}
+
+fn compute_stage<F>(
+    src: Vec<(f32, f32)>, 
+    curr: usize, 
+    limit: usize, 
+    butterfly_params_func: F
+) -> Vec<(f32, f32)> where F: Fn(usize, usize, usize, usize) -> (f32, f32) {
     match curr {
         curr if curr >= limit => src,
         _ => compute_stage(match curr - 1 {
@@ -213,9 +254,13 @@ fn compute_stage(src: Vec<(f32, f32)>, curr: usize, limit: usize) -> Vec<(f32, f
             num => (0..(2usize.pow(num as u32))).into_iter().fold(Vec::new(), |mut acc, i| {
                 let res: Vec<_> = (0..(2usize.pow((limit - curr) as u32))).into_iter().map(|j| {
                     let m = 2usize.pow((limit - curr + 1) as u32) * i + j;
-                    let (n, r) = (2usize.pow((limit - curr) as u32) + m, 2usize.pow((curr - 1) as u32) * j);
+                    let n = 2usize.pow((limit - curr) as u32) + m;
 
-                    let w = 2.0 * PI * r as f32 / n as f32; let ((a_real, a_img), (b_real, b_img), (c_real, c_img)) = (src[m], src[n], (w.cos(), -w.sin()));
+                    let ((a_real, a_img), (b_real, b_img), (c_real, c_img)) = (
+                        src[m], 
+                        src[n], 
+                        butterfly_params_func(curr, limit, j, m)
+                    );
 
                     if curr == limit {
                         (
@@ -241,7 +286,7 @@ fn compute_stage(src: Vec<(f32, f32)>, curr: usize, limit: usize) -> Vec<(f32, f
                 next.append(&mut front); next.append(&mut back);
                 acc.append(&mut next); acc
             })
-        }, curr + 1, limit)
+        }, curr + 1, limit, butterfly_params_func)
     }
 }
 
@@ -257,7 +302,7 @@ fn compute_index_weight(idx: usize) -> usize {
     (0..num).into_iter().fold(0, |acc, i| acc + 2usize.pow(i as u32))
 }
 
-fn sort_fft_vec<'a>(v: &'a mut Vec<(f32, f32)>) {
+fn reverse_bits<'a>(v: &'a mut Vec<(f32, f32)>) {
     for (i, j) in indices(v.len()).iter().enumerate().filter(|&(i, j)| i < *j) { 
         v.swap(i, *j); 
     }
@@ -269,8 +314,8 @@ pub fn fft(src: Vec<f32>) -> Vec<(f32, f32)> {
         src.into_iter().map(|i| (i, 0.0)).collect()
     );
 
-    let mut res = compute_stage(pair_v, 1, stage_num);
-    sort_fft_vec(&mut res); res
+    let mut res = compute_stage(pair_v, 1, stage_num, fft_butterfly_params);
+    reverse_bits(&mut res); res
 }
 
 fn sinc(x: f32) -> f32 {
@@ -387,4 +432,15 @@ mod tests {
             (&3, &4, &5)]
         );
     }
+}
+
+pub fn ifft(src: Vec<(f32, f32)>) -> Vec<(f32, f32)> {
+    let (n, stage_num) = (
+        src.len(), 
+        count_stage(src.len())
+    );
+
+    let mut res = compute_stage(src, 1, stage_num, ifft_butterfly_params);
+    reverse_bits(&mut res); 
+    res.into_iter().map(|(r, i)| (r / n as f32, i / n as f32)).collect()
 }
