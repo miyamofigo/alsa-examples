@@ -341,6 +341,7 @@ pub fn iir_lpf(anal_freq: f32, qf: f32) -> (IIRDenominatorParams, IIRNumeratorPa
     let digit_freq = bilinear_transform(anal_freq);
     let temp = 4.0 * PI.powi(2) * digit_freq.powi(2);
     let denom = 1.0 + 2.0 * PI * digit_freq / qf + temp;
+
     ((1.0,
       (2.0 * temp - 2.0) / denom,
       (1.0 - 2.0 * PI * digit_freq / qf + temp / denom)),
